@@ -882,6 +882,18 @@ impl McpServer {
 /// contains this separator.
 pub const MCP_TOOL_NAME_SEPARATOR: &str = "__";
 
+/// The name the agent sees for `tool` of MCP server `server`: `<server>__<tool>`, with every character
+/// outside `[A-Za-z0-9_-]` replaced by `_`. Model APIs reject other characters in tool names (Anthropic:
+/// `^[a-zA-Z0-9_-]{1,128}$`), so a server tool such as `devices.list` would otherwise push the agent
+/// into text-mode tool calls it can't parse. Calls still reach the server under its own name
+/// (`tool_index` keeps it).
+pub fn prefixed_tool_name(server: &str, tool: &str) -> String {
+    format!("{server}{MCP_TOOL_NAME_SEPARATOR}{tool}")
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect()
+}
+
 /// Registry of all connected MCP servers, with a flat tool index.
 pub struct McpRegistry {
     servers: Vec<McpServer>,
@@ -907,8 +919,7 @@ impl McpRegistry {
                     let tools = server.tools().await;
                     for tool in &tools {
                         // Prefix prevents name collisions across servers
-                        let prefixed =
-                            format!("{}{MCP_TOOL_NAME_SEPARATOR}{}", config.name, tool.name);
+                        let prefixed = prefixed_tool_name(&config.name, &tool.name);
                         tool_index.insert(prefixed, (server_idx, tool.name.clone()));
                     }
                     servers.push(server);
@@ -1054,7 +1065,7 @@ impl McpRegistry {
             let name = server.name().await;
             let tools = server.tools().await;
             for tool in &tools {
-                let prefixed = format!("{name}{MCP_TOOL_NAME_SEPARATOR}{}", tool.name);
+                let prefixed = prefixed_tool_name(&name, &tool.name);
                 tool_index.insert(prefixed, (idx, tool.name.clone()));
             }
             server_index.insert(name, idx);
@@ -1483,6 +1494,13 @@ impl McpRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefixed_tool_names_are_safe_for_model_apis() {
+        assert_eq!(prefixed_tool_name("remote", "devices.list"), "remote__devices_list");
+        assert_eq!(prefixed_tool_name("fs", "read_file"), "fs__read_file");
+        assert_eq!(prefixed_tool_name("t3", "thread start/now"), "t3__thread_start_now");
+    }
     use crate::mcp_transport::create_transport;
     #[cfg(unix)]
     use crate::mcp_transport::{StdioTransport, StdioWriteTestHook};
