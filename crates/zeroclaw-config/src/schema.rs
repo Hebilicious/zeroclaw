@@ -5882,6 +5882,12 @@ pub struct McpServerConfig {
     #[credential_class = "encrypted_secret"]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
     pub headers: HashMap<String, String>,
+    /// Sign in to this HTTP/SSE server with OAuth 2.1 (protected-resource discovery, dynamic
+    /// client registration, PKCE) instead of fixed headers. Run `zeroclaw mcp login <name>` once;
+    /// the token is kept in `<config dir>/mcp-oauth/<name>.json` and refreshed when the server
+    /// issues refresh tokens.
+    #[serde(default)]
+    pub oauth: bool,
     /// Optional per-call timeout in seconds (hard capped in validation).
     #[serde(default)]
     pub tool_timeout_secs: Option<u64>,

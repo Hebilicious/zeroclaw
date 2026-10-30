@@ -1466,6 +1466,13 @@ Examples:
         auth_command: AuthCommands,
     },
 
+    /// Sign in to remote MCP servers that use OAuth (`oauth = true`)
+    #[cfg(feature = "agent-runtime")]
+    Mcp {
+        #[command(subcommand)]
+        mcp_command: McpCommands,
+    },
+
     /// Enroll with an inbound OIDC identity provider to obtain an RPC auth token
     #[cfg(feature = "agent-runtime")]
     Oidc {
@@ -8540,6 +8547,17 @@ enum EstopSubcommands {
     },
 }
 
+#[cfg(feature = "agent-runtime")]
+#[derive(Subcommand, Debug)]
+enum McpCommands {
+    /// Sign in to an MCP server configured with `oauth = true`. Prints the sign-in address; paste
+    /// back the address the browser lands on (works on a headless host)
+    Login {
+        /// The server's name (`[mcp.servers]` entry)
+        name: String,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum AuthCommands {
     /// Login with OAuth (OpenAI Codex, Gemini, or xAI)
@@ -12330,6 +12348,9 @@ Add pricing to the active provider profile or supply a catalog entry."
         }
 
         Commands::Auth { auth_command } => handle_auth_command(auth_command, &config).await,
+
+        #[cfg(feature = "agent-runtime")]
+        Commands::Mcp { mcp_command } => handle_mcp_command(mcp_command, &config).await,
 
         #[cfg(feature = "agent-runtime")]
         Commands::Oidc { oidc_command } => handle_oidc_command(oidc_command, &config).await,
@@ -29833,5 +29854,25 @@ type = "integer"
             "no raw control character reaches the terminal: {lines:#?}"
         );
         assert!(binding_on_disk(&config.config_path, "operations").is_some());
+    }
+}
+
+/// `zeroclaw mcp login <name>`: the OAuth sign-in of a remote MCP server (zeroclaw_tools::mcp_oauth).
+#[cfg(feature = "agent-runtime")]
+async fn handle_mcp_command(command: McpCommands, config: &Config) -> Result<()> {
+    match command {
+        McpCommands::Login { name } => {
+            let Some(server) = config.mcp.servers.iter().find(|server| server.name == name) else {
+                anyhow::bail!("no MCP server named `{name}` in [mcp.servers]");
+            };
+            if !server.oauth {
+                anyhow::bail!("MCP server `{name}` does not use OAuth: set mcp.servers.{name}.oauth = true");
+            }
+            let url = server.url.as_deref().context("an OAuth MCP server needs a url")?;
+            let client = reqwest::Client::new();
+            let mut input = std::io::BufReader::new(std::io::stdin());
+            let mut output = std::io::stdout();
+            zeroclaw_tools::mcp_oauth::login(&name, url, &client, &mut input, &mut output).await
+        }
     }
 }

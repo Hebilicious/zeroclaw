@@ -1145,6 +1145,8 @@ pub struct HttpTransport {
     max_response_bytes: u64,
     client: reqwest::Client,
     headers: std::collections::HashMap<String, String>,
+    /// `oauth = true`: this server's name, which keys the token `zeroclaw mcp login` stored.
+    oauth_server: Option<String>,
     session_id: ParkingMutex<Option<String>>,
 }
 
@@ -1179,6 +1181,7 @@ impl HttpTransport {
             max_response_bytes: resolve_max_response_bytes(config),
             client,
             headers: config.headers.clone(),
+            oauth_server: config.oauth.then(|| config.name.clone()),
             session_id: ParkingMutex::new(None),
         })
     }
@@ -1244,6 +1247,7 @@ impl SharedMcpTransportConn for HttpTransport {
         if !has_content_type {
             req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
         }
+        req = crate::mcp_oauth::authorize(req, self.oauth_server.as_deref(), &self.client).await?;
         for (key, value) in &self.headers {
             req = req.header(key, value);
         }
@@ -1352,6 +1356,8 @@ pub struct SseTransport {
     max_response_bytes: u64,
     client: reqwest::Client,
     headers: std::collections::HashMap<String, String>,
+    /// `oauth = true`: send the token `zeroclaw mcp login` stored for this server.
+    oauth: bool,
     require_https: bool,
     conn: Mutex<SseConnState>,
     shared: std::sync::Arc<Mutex<SseSharedState>>,
@@ -1398,6 +1404,7 @@ impl SseTransport {
             max_response_bytes: resolve_max_response_bytes(config),
             client,
             headers: config.headers.clone(),
+            oauth: config.oauth,
             require_https,
             conn: Mutex::new(SseConnState {
                 stream_state: SseStreamState::Unknown,
@@ -1431,6 +1438,7 @@ impl SseTransport {
             .client
             .get(&self.sse_url)
             .header("Cache-Control", "no-cache");
+        req = crate::mcp_oauth::authorize(req, self.oauth.then_some(self.server_name.as_str()), &self.client).await?;
         for (key, value) in &self.headers {
             req = req.header(key, value);
         }
@@ -2020,6 +2028,7 @@ impl SharedMcpTransportConn for SseTransport {
         if !has_content_type {
             req = req.header("Content-Type", MCP_JSON_CONTENT_TYPE);
         }
+        req = crate::mcp_oauth::authorize(req, self.oauth.then_some(self.server_name.as_str()), &self.client).await?;
         for (key, value) in &self.headers {
             req = req.header(key, value);
         }

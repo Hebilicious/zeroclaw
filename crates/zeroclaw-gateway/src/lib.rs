@@ -35,6 +35,7 @@ pub mod auth_rate_limit;
 pub mod canvas;
 pub mod node_tool;
 pub mod nodes;
+pub mod openai_compat;
 pub mod openapi;
 #[cfg(feature = "plugins-wasm")]
 mod plugin_webhook;
@@ -2468,6 +2469,9 @@ pub async fn run_gateway_with_plugin_webhooks(
         .route("/pair", post(handle_pair))
         .route("/pair/code", get(handle_pair_code))
         .route("/webhook", post(handle_webhook))
+        // OpenAI-compatible chat (openai_compat.rs): the webhook's turn and auth.
+        .route("/v1/chat/completions", post(openai_compat::handle_chat_completions))
+        .route("/v1/models", get(openai_compat::handle_models))
         .merge(sop_webhook_routes())
         .merge(optional_channel_routes())
         .merge(optional_tool_routes())
