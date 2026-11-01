@@ -2068,7 +2068,8 @@ impl Agent {
     /// never let an old static or activated tool survive a removed grant.
     ///
     /// Pinned MCP resource content is governed by the same selector: each
-    /// block was admitted at assembly under its `<server>__<uri>` name, so a
+    /// block was admitted at assembly under its `<server>__<uri>` name (a
+    /// server's instructions under its `<server>__` tool prefix), so a
     /// narrowing that no longer names it withdraws the block from every later
     /// prompt rather than letting construction-time text outlive its grant.
     pub fn narrow_to_principal_tools(&mut self, allowed: Option<&[String]>) {
@@ -2087,7 +2088,8 @@ impl Agent {
                 .unwrap_or_else(|e| e.into_inner())
                 .retain_allowed(allowed);
         }
-        self.mcp_pinned.retain(|block| allowed.contains(&block.key));
+        self.mcp_pinned
+            .retain(|block| block.is_admitted_by(allowed));
         self.disable_principal_unaware_nested_tools();
     }
 

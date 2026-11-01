@@ -100,6 +100,10 @@ async fn handshake(
 pub struct McpServerCapabilities {
     pub(crate) resources: bool,
     pub(crate) prompts: bool,
+    /// The server's `instructions` from the same result: how its tools fit
+    /// together, meant for the model's context. Server-origin text; it reaches
+    /// the prompt only through `mcp_context`, marked untrusted.
+    pub(crate) instructions: Option<String>,
 }
 
 impl McpServerCapabilities {
@@ -108,10 +112,22 @@ impl McpServerCapabilities {
     pub fn from_init_result(result: &serde_json::Value) -> Self {
         let caps = result.get("capabilities");
         let has = |key: &str| caps.and_then(|c| c.get(key)).is_some();
+        let instructions = result
+            .get("instructions")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string);
         Self {
             resources: has("resources"),
             prompts: has("prompts"),
+            instructions,
         }
+    }
+
+    /// The server's `instructions`, when it sent any.
+    pub fn instructions(&self) -> Option<&str> {
+        self.instructions.as_deref()
     }
 
     pub fn supports_resources(&self) -> bool {
@@ -1293,6 +1309,16 @@ impl McpRegistry {
         self.server_index.keys().cloned().collect()
     }
 
+    /// The `instructions` a connected server sent at its latest handshake.
+    pub async fn server_instructions(&self, server: &str) -> Option<String> {
+        let idx = *self.server_index.get(server)?;
+        self.servers[idx]
+            .capabilities()
+            .await
+            .instructions()
+            .map(str::to_string)
+    }
+
     /// Check health of every connected server. Returns names of dead servers.
     pub fn health_check_all(&self) -> Vec<String> {
         let names = self.server_names();
@@ -1497,9 +1523,15 @@ mod tests {
 
     #[test]
     fn prefixed_tool_names_are_safe_for_model_apis() {
-        assert_eq!(prefixed_tool_name("remote", "devices.list"), "remote__devices_list");
+        assert_eq!(
+            prefixed_tool_name("remote", "devices.list"),
+            "remote__devices_list"
+        );
         assert_eq!(prefixed_tool_name("fs", "read_file"), "fs__read_file");
-        assert_eq!(prefixed_tool_name("t3", "thread start/now"), "t3__thread_start_now");
+        assert_eq!(
+            prefixed_tool_name("t3", "thread start/now"),
+            "t3__thread_start_now"
+        );
     }
     use crate::mcp_transport::create_transport;
     #[cfg(unix)]
@@ -2493,6 +2525,7 @@ mod tests {
             McpServerCapabilities {
                 resources: true,
                 prompts: false,
+                ..Default::default()
             },
             serde_json::json!({"resources":[{"uri":"u","name":"n"}],"nextCursor":"c"}),
         );
@@ -2520,6 +2553,7 @@ mod tests {
             McpServerCapabilities {
                 resources: false,
                 prompts: true,
+                ..Default::default()
             },
             serde_json::json!({"messages":[{"role":"user","content":{"type":"text","text":"hi"}}]}),
         );
@@ -3030,6 +3064,26 @@ done
         let caps = McpServerCapabilities::from_init_result(&init);
         assert!(!caps.supports_resources());
         assert!(!caps.supports_prompts());
+    }
+
+    #[test]
+    fn instructions_parse_from_init_result_trimmed_and_blank_ignored() {
+        let init =
+            serde_json::json!({ "capabilities": {}, "instructions": "  Call list first.\n" });
+        let caps = McpServerCapabilities::from_init_result(&init);
+        assert_eq!(caps.instructions(), Some("Call list first."));
+
+        let blank = serde_json::json!({ "instructions": "   " });
+        assert_eq!(
+            McpServerCapabilities::from_init_result(&blank).instructions(),
+            None
+        );
+
+        let missing = serde_json::json!({ "capabilities": {} });
+        assert_eq!(
+            McpServerCapabilities::from_init_result(&missing).instructions(),
+            None
+        );
     }
 
     // ── Reconnect on stale session (streamable HTTP) ───────────────────────

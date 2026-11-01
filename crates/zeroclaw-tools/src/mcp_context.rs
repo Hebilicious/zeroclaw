@@ -23,6 +23,61 @@ pub struct PinnedResourceBlock {
     pub rendered: String,
 }
 
+/// Longest server `instructions` text kept in the prompt, in characters.
+const MAX_SERVER_INSTRUCTIONS_CHARS: usize = 4000;
+
+impl PinnedResourceBlock {
+    /// Whether a caller allowed `allowed` (exact tool names) may still see this
+    /// block. A resource block is keyed by its `<server>__<uri>` name and needs
+    /// that name; a server-instructions block is keyed by the server's tool
+    /// prefix `<server>__` and stays while any of that server's tools is allowed.
+    #[must_use]
+    pub fn is_admitted_by(&self, allowed: &[String]) -> bool {
+        if self.key.ends_with("__") {
+            allowed.iter().any(|name| name.starts_with(&self.key))
+        } else {
+            allowed.contains(&self.key)
+        }
+    }
+}
+
+/// The `instructions` a server sent at `initialize`, as a block admitted while
+/// the caller may use at least one of that server's tools.
+async fn server_instructions_block(
+    registry: &Arc<McpRegistry>,
+    server: &str,
+    policy: Option<&ToolAccessPolicy>,
+) -> Option<PinnedResourceBlock> {
+    let instructions = registry.server_instructions(server).await?;
+    let prefix = format!("{server}__");
+    let usable = registry
+        .tool_names()
+        .iter()
+        .any(|name| name.starts_with(&prefix) && policy.is_none_or(|p| p.is_tool_allowed(name)));
+    if !usable {
+        return None;
+    }
+    Some(PinnedResourceBlock {
+        rendered: wrap_server_instructions(server, &instructions),
+        key: prefix,
+    })
+}
+
+/// Wrap a server's `instructions` in a provenance block, secret-scrubbed and
+/// length-bounded like other server-origin text.
+pub fn wrap_server_instructions(server: &str, instructions: &str) -> String {
+    let scrubbed = zeroclaw_providers::scrub_secret_patterns(instructions);
+    let bounded: String = scrubbed
+        .chars()
+        .take(MAX_SERVER_INSTRUCTIONS_CHARS)
+        .collect();
+    format!(
+        "<mcp-server-instructions server=\"{}\" trust=\"untrusted-external\">\n{}\n</mcp-server-instructions>",
+        attr_escape(server),
+        bounded.trim_end()
+    )
+}
+
 /// Read every policy-admitted pinned resource and return it as an attributed
 /// block. [`render_pinned_resources_section`] turns the blocks into the prompt
 /// section; keeping the blocks lets the holder prune them later.
@@ -33,6 +88,9 @@ pub async fn build_pinned_resource_blocks(
 ) -> Vec<PinnedResourceBlock> {
     let mut blocks = Vec::new();
     for cfg in configs {
+        if let Some(block) = server_instructions_block(registry, &cfg.name, policy).await {
+            blocks.push(block);
+        }
         for uri in &cfg.pinned_resources {
             let prefixed = format!("{}__{}", cfg.name, uri);
             if let Some(p) = policy
@@ -69,9 +127,10 @@ pub async fn build_pinned_resource_blocks(
     blocks
 }
 
-/// Render attributed pinned-resource blocks into the `## Pinned MCP Resources`
-/// prompt section. Empty input renders to an empty string, so a holder whose
-/// last block was pruned emits no section at all.
+/// Render attributed blocks (each server's instructions, then its pinned
+/// resources) into the `## Pinned MCP Resources` prompt section. Empty input
+/// renders to an empty string, so a holder whose last block was pruned emits no
+/// section at all.
 #[must_use]
 pub fn render_pinned_resources_section(blocks: &[PinnedResourceBlock]) -> String {
     if blocks.is_empty() {
@@ -164,6 +223,36 @@ pub fn render_prompt_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_instructions_block_stays_while_any_tool_of_its_server_is_allowed() {
+        let instructions = PinnedResourceBlock {
+            key: "media__".into(),
+            rendered: wrap_server_instructions("media", "Find, then get."),
+        };
+        let resource = PinnedResourceBlock {
+            key: "media__doc://a".into(),
+            rendered: "r".into(),
+        };
+        let allowed = vec!["media__series_get".to_string()];
+        assert!(instructions.is_admitted_by(&allowed));
+        assert!(!resource.is_admitted_by(&allowed));
+        assert!(!instructions.is_admitted_by(&["remote__devices_list".to_string()]));
+        // A server named like another's prefix does not borrow its grant.
+        assert!(!instructions.is_admitted_by(&["mediaplus__x".to_string()]));
+        assert!(!instructions.is_admitted_by(&[]));
+    }
+
+    #[test]
+    fn server_instructions_are_marked_untrusted_escaped_and_bounded() {
+        let wrapped =
+            wrap_server_instructions("a\"b", &"z".repeat(MAX_SERVER_INSTRUCTIONS_CHARS + 50));
+        assert!(wrapped.starts_with(
+            "<mcp-server-instructions server=\"a&quot;b\" trust=\"untrusted-external\">"
+        ));
+        assert!(wrapped.ends_with("</mcp-server-instructions>"));
+        assert_eq!(wrapped.matches('z').count(), MAX_SERVER_INSTRUCTIONS_CHARS);
+    }
 
     #[test]
     fn rendered_section_is_the_attributed_blocks_in_order_and_empty_when_pruned() {
