@@ -756,6 +756,9 @@ pub fn looks_like_tool_protocol_envelope(text: &str) -> bool {
 
 pub fn looks_like_malformed_tool_protocol_envelope(text: &str) -> bool {
     let trimmed = text.trim();
+    if is_call_placeholder_only(trimmed) {
+        return true;
+    }
     if looks_like_tool_protocol_example(trimmed) {
         return false;
     }
@@ -939,6 +942,91 @@ fn parse_xml_tool_calls(xml_content: &str) -> Option<Vec<ParsedToolCall>> {
 }
 
 /// Parse MiniMax-style XML tool calls with attributed invoke/parameter tags.
+/// Tags that may wrap a named-parameter call: `<invoke>`, `<invoke_tool>`, `<invoke/>`,
+/// `<function_calls>` and their closings, and a stray unclosed `<parameter`.
+static NAMED_PARAMETER_WRAPPER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)</?(?:invoke\w*|function_calls)\b[^<>]*/?>|<parameter\b\s*(?:\n|$)")
+        .expect("NAMED_PARAMETER_WRAPPER_RE regex must compile")
+});
+
+/// A call whose tool is itself a parameter: `<parameter name="name">tool</parameter>` (or
+/// `"tool"`) followed by `<parameter name="arguments">{...}</parameter>` or named arguments,
+/// inside `<invoke…>`-like wrappers or none. Models with native tools sometimes write this as
+/// text. Accepted only when the whole response is this markup, so prose is never read as a call.
+fn parse_named_parameter_calls(response: &str) -> Option<Vec<ParsedToolCall>> {
+    let rest = MINIMAX_PARAMETER_RE.replace_all(response, "");
+    if !NAMED_PARAMETER_WRAPPER_RE
+        .replace_all(&rest, "")
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+
+    let mut calls = Vec::new();
+    let mut current: Option<(String, serde_json::Map<String, serde_json::Value>)> = None;
+    for cap in MINIMAX_PARAMETER_RE.captures_iter(response) {
+        let key = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map_or("", |m| m.as_str().trim());
+        let value = cap.get(3).map_or("", |m| m.as_str().trim());
+        match key.to_ascii_lowercase().as_str() {
+            "name" | "tool" | "tool_name" => {
+                if let Some((name, args)) = current.take() {
+                    calls.push(named_parameter_call(name, args));
+                }
+                current = (!value.is_empty()).then(|| (value.to_string(), serde_json::Map::new()));
+            }
+            "arguments" | "args" | "input" | "parameters" => {
+                if let Some((_, args)) = current.as_mut()
+                    && let Some(serde_json::Value::Object(object)) =
+                        extract_json_values(value).into_iter().next()
+                {
+                    args.extend(object);
+                }
+            }
+            _ if !key.is_empty() => {
+                if let Some((_, args)) = current.as_mut() {
+                    let parsed = extract_json_values(value).into_iter().next();
+                    args.insert(
+                        key.to_string(),
+                        parsed.unwrap_or_else(|| serde_json::Value::String(value.to_string())),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some((name, args)) = current {
+        calls.push(named_parameter_call(name, args));
+    }
+    (!calls.is_empty()).then_some(calls)
+}
+
+fn named_parameter_call(
+    name: String,
+    args: serde_json::Map<String, serde_json::Value>,
+) -> ParsedToolCall {
+    ParsedToolCall {
+        name,
+        arguments: serde_json::Value::Object(args),
+        tool_call_id: None,
+    }
+}
+
+/// A response that is nothing but `call_placeholder` tokens: a model's degenerate attempt at a
+/// tool call, with no call in it.
+fn is_call_placeholder_only(text: &str) -> bool {
+    let mut tokens = text.split_whitespace().peekable();
+    tokens.peek().is_some()
+        && tokens.all(|token| {
+            token
+                .trim_matches('_')
+                .eq_ignore_ascii_case("call_placeholder")
+        })
+}
+
 fn parse_minimax_invoke_calls(response: &str) -> Option<(String, Vec<ParsedToolCall>)> {
     let mut calls = Vec::new();
     let mut text_parts = Vec::new();
@@ -2131,6 +2219,12 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
         && !minimax_calls.is_empty()
     {
         return (minimax_text, minimax_calls);
+    }
+
+    if !response.contains("<tools>")
+        && let Some(named_calls) = parse_named_parameter_calls(response)
+    {
+        return (String::new(), named_calls);
     }
 
     // Fall back to XML-style tool-call tag parsing.
