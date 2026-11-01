@@ -1236,6 +1236,7 @@ impl FamilyProviderFactory for AnthropicModelProviderConfig {
         if let Some(cache_ttl) = opts.cache_ttl {
             b = b.cache_ttl(cache_ttl);
         }
+        b = b.reasoning_effort(opts.reasoning_effort.clone());
         Ok(Box::new(b.build()))
     }
 }

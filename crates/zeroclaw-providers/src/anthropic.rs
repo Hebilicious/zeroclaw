@@ -102,6 +102,9 @@ pub struct AnthropicModelProvider {
     /// One TTL per request by design. Defaults to the 5-minute API
     /// default.
     cache_ttl: CacheTtl,
+    /// The runtime's `reasoning_effort`, sent as `output_config.effort` to models
+    /// that take it ([`anthropic_effort`]). `None` leaves the model's default.
+    reasoning_effort: Option<String>,
     /// Memoized cleaned tool schemas: each registered schema is cleaned once
     /// per provider instance (not once per request) and the byte-stable
     /// result keeps the `cache_control` tools block identical across
@@ -166,6 +169,14 @@ struct NativeChatRequest {
     /// only; `None` (the default) keeps the request byte-identical to today.
     #[serde(skip_serializing_if = "Option::is_none")]
     fallbacks: Option<Vec<NativeFallbackEntry>>,
+    /// `effort` for models that take it; `None` leaves the field out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<NativeOutputConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeOutputConfig {
+    effort: &'static str,
 }
 
 /// One entry in the native `fallbacks` array: a model Anthropic may serve
@@ -287,10 +298,57 @@ pub(crate) enum AnthropicThinkingStyle {
 /// `fable-5-1` alike; a hypothetical future budget-shaped member of the
 /// family would need this matcher revisited.
 pub(crate) fn anthropic_thinking_style(model: &str) -> AnthropicThinkingStyle {
-    if model.contains("claude-opus-4-7") || model.contains("claude-fable-5") {
+    // Budget thinking is rejected with a 400 from Opus 4.7 on and on the whole Claude 5 family.
+    let adaptive_only = [
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    ];
+    if adaptive_only.iter().any(|family| model.contains(family)) {
         AnthropicThinkingStyle::Adaptive
     } else {
         AnthropicThinkingStyle::Budget
+    }
+}
+
+/// The `output_config.effort` for `model` from the runtime's `reasoning_effort`, or `None` when
+/// the model takes no effort (Haiku 4.5, Sonnet 4.5 and older answer it with an error) or none is
+/// configured. ZeroClaw's `minimal` becomes `low`; a level above what the model offers comes down
+/// to its highest (Opus 4.5 stops at `high`, the 4.6 models at `max` without `xhigh`).
+pub(crate) fn anthropic_effort(model: &str, configured: Option<&str>) -> Option<&'static str> {
+    let level = match configured?.trim().to_ascii_lowercase().as_str() {
+        "minimal" | "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        "xhigh" => "xhigh",
+        "max" => "max",
+        _ => return None,
+    };
+    let five_or_later = [
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    ]
+    .iter()
+    .any(|family| model.contains(family));
+    if five_or_later || model.contains("claude-opus-4-7") || model.contains("claude-opus-4-8") {
+        Some(level)
+    } else if model.contains("claude-opus-4-6") || model.contains("claude-sonnet-4-6") {
+        Some(if level == "xhigh" { "high" } else { level })
+    } else if model.contains("claude-opus-4-5") {
+        Some(if matches!(level, "xhigh" | "max") {
+            "high"
+        } else {
+            level
+        })
+    } else {
+        None
     }
 }
 
@@ -636,6 +694,7 @@ pub struct AnthropicBuilder {
     timeout_secs: Option<u64>,
     server_fallback_models: Vec<String>,
     cache_ttl: Option<CacheTtl>,
+    reasoning_effort: Option<String>,
 }
 
 impl AnthropicBuilder {
@@ -691,6 +750,11 @@ impl AnthropicBuilder {
         self
     }
 
+    pub fn reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+
     pub fn build(self) -> AnthropicModelProvider {
         AnthropicModelProvider {
             alias: self.alias,
@@ -705,12 +769,19 @@ impl AnthropicBuilder {
                 .unwrap_or(zeroclaw_api::model_provider::BASELINE_TIMEOUT_SECS),
             server_fallback_models: self.server_fallback_models,
             cache_ttl: self.cache_ttl.unwrap_or_default(),
+            reasoning_effort: self.reasoning_effort,
             schema_cache: zeroclaw_api::schema::SchemaCleanCache::new(),
         }
     }
 }
 
 impl AnthropicModelProvider {
+    /// The `output_config` for a request to `model`: its effort, when it takes one.
+    fn output_config_for(&self, model: &str) -> Option<NativeOutputConfig> {
+        anthropic_effort(model, self.reasoning_effort.as_deref())
+            .map(|effort| NativeOutputConfig { effort })
+    }
+
     /// Entry point. Only `alias` is required; every other field is set
     /// via a labelled chain method on the returned [`AnthropicBuilder`].
     pub fn builder(alias: &str) -> AnthropicBuilder {
@@ -723,6 +794,7 @@ impl AnthropicModelProvider {
             timeout_secs: None,
             server_fallback_models: Vec::new(),
             cache_ttl: None,
+            reasoning_effort: None,
         }
     }
 
@@ -2916,6 +2988,7 @@ impl ModelProvider for AnthropicModelProvider {
             stream: None,
             thinking: None,
             fallbacks,
+            output_config: self.output_config_for(model),
         };
 
         let mut request = self
@@ -3070,6 +3143,7 @@ impl ModelProvider for AnthropicModelProvider {
             stream: None,
             thinking: thinking_config,
             fallbacks,
+            output_config: self.output_config_for(model),
         };
 
         let req = self
@@ -3308,6 +3382,7 @@ impl ModelProvider for AnthropicModelProvider {
                 // Streaming path (incl. this thinking `stream: None` request):
                 // never opts into server-side fallback.
                 fallbacks: None,
+                output_config: self.output_config_for(model),
             };
             // Serialize eagerly so the request body is owned and `'static`
             // across the async boundary.
@@ -3439,6 +3514,7 @@ impl ModelProvider for AnthropicModelProvider {
             thinking: thinking_config,
             // Streaming never opts into server-side fallback.
             fallbacks: None,
+            output_config: self.output_config_for(model),
         };
 
         let body = match Self::build_streaming_request(&native_request) {
@@ -4616,6 +4692,81 @@ data: {\"type\":\"message_stop\"}\n\n";
     }
 
     #[test]
+    fn effort_goes_to_models_that_take_it_and_comes_down_to_what_they_offer() {
+        assert_eq!(
+            anthropic_effort("claude-haiku-5-5", Some("high")),
+            Some("high")
+        );
+        assert_eq!(
+            anthropic_effort("claude-opus-5-5", Some("xhigh")),
+            Some("xhigh")
+        );
+        assert_eq!(
+            anthropic_effort("claude-sonnet-4-6", Some("xhigh")),
+            Some("high")
+        );
+        assert_eq!(
+            anthropic_effort("claude-opus-4-5", Some("max")),
+            Some("high")
+        );
+        assert_eq!(
+            anthropic_effort("claude-haiku-5-5", Some("minimal")),
+            Some("low")
+        );
+        assert_eq!(anthropic_effort("claude-haiku-4-5", Some("high")), None);
+        assert_eq!(anthropic_effort("claude-sonnet-4-5", Some("high")), None);
+        assert_eq!(anthropic_effort("claude-haiku-5-5", None), None);
+    }
+
+    #[test]
+    fn a_configured_effort_is_sent_as_output_config() {
+        let provider = AnthropicModelProvider::builder("main")
+            .reasoning_effort(Some("high".into()))
+            .build();
+        let request = NativeChatRequest {
+            model: "claude-haiku-5-5".into(),
+            max_tokens: 16,
+            system: None,
+            messages: Vec::new(),
+            temperature: None,
+            tools: None,
+            tool_choice: None,
+            stream: None,
+            thinking: None,
+            fallbacks: None,
+            output_config: provider.output_config_for("claude-haiku-5-5"),
+        };
+        let body = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(
+            body["output_config"],
+            serde_json::json!({ "effort": "high" })
+        );
+        assert!(provider.output_config_for("claude-haiku-4-5").is_none());
+    }
+
+    #[test]
+    fn the_claude_5_family_thinks_adaptively() {
+        for model in [
+            "claude-haiku-5-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-opus-4-8",
+        ] {
+            assert!(
+                matches!(
+                    anthropic_thinking_style(model),
+                    AnthropicThinkingStyle::Adaptive
+                ),
+                "{model}"
+            );
+        }
+        assert!(matches!(
+            anthropic_thinking_style("claude-haiku-4-5"),
+            AnthropicThinkingStyle::Budget
+        ));
+    }
+
+    #[test]
     fn anthropic_thinking_style_matrix() {
         // Adaptive-only families: fixed-budget `enabled` returns 400.
         assert_eq!(
@@ -4732,6 +4883,7 @@ data: {\"type\":\"message_stop\"}\n\n";
             stream: None,
             thinking: None,
             fallbacks: None,
+            output_config: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("max_tokens"));
@@ -4754,6 +4906,7 @@ data: {\"type\":\"message_stop\"}\n\n";
             stream: None,
             thinking: None,
             fallbacks: None,
+            output_config: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(
@@ -5647,6 +5800,7 @@ data: {\"type\":\"message_stop\"}\n\n";
             stream: None,
             thinking: None,
             fallbacks: None,
+            output_config: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -5676,6 +5830,7 @@ data: {\"type\":\"message_stop\"}\n\n";
             stream: None,
             thinking: None,
             fallbacks: None,
+            output_config: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -10600,6 +10755,7 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\"usag
                 display: Some(ThinkingDisplay::Updates),
             }),
             fallbacks: None,
+            output_config: None,
         };
 
         let body = serde_json::to_value(&request).expect("serialize");
@@ -10925,6 +11081,7 @@ data: {\"type\":\"message_stop\"}\n\n";
                 display: Some(ThinkingDisplay::Updates),
             }),
             fallbacks: None,
+            output_config: None,
         };
 
         let body = serde_json::to_value(&request).expect("serialize");
