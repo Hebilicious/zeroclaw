@@ -1,8 +1,9 @@
 //! OpenAI-compatible chat endpoint: `POST /v1/chat/completions` (and `GET /v1/models`).
 //!
 //! Lets any OpenAI client talk to a ZeroClaw agent. A request runs one gateway chat turn, the
-//! same turn `/webhook` runs: its last user message is the turn's input, and the agent keeps the
-//! conversation itself (per session), so earlier messages in `messages` are not replayed.
+//! same turn `/webhook` runs: its last user message is the turn's input. A turn has no transcript
+//! of its own (the session only scopes memory recall), so the earlier user and assistant messages
+//! in `messages` come with it as context, the most recent ones and each bounded.
 //!
 //! - Authentication is the webhook's: the gateway's pairing token, or `gateway.webhook_secret`.
 //!   OpenAI clients send their key as `Authorization: Bearer <key>`; that key is checked as the
@@ -60,7 +61,7 @@ fn content_text(content: &Value) -> String {
     }
 }
 
-/// The turn's input: the last user message.
+/// The last user message.
 fn last_user_message(messages: &[ChatMessage]) -> Option<String> {
     messages
         .iter()
@@ -68,6 +69,48 @@ fn last_user_message(messages: &[ChatMessage]) -> Option<String> {
         .find(|message| message.role == "user")
         .map(|message| content_text(&message.content))
         .filter(|text| !text.trim().is_empty())
+}
+
+/// How many earlier messages of the conversation are given to the turn, and how much of each.
+const MAX_EARLIER_MESSAGES: usize = 12;
+const MAX_EARLIER_CHARS: usize = 1000;
+
+/// The turn's input: the last user message, preceded by the conversation before it. A gateway
+/// turn starts from the agent's own prompt with no transcript, so an OpenAI client, which sends
+/// the whole conversation each time, gets it read as context: the user's and the assistant's
+/// earlier messages (system messages are the agent's own prompt's business), the most recent
+/// ones, each bounded.
+fn turn_input(messages: &[ChatMessage]) -> Option<String> {
+    let last = messages
+        .iter()
+        .rposition(|message| message.role == "user")?;
+    let current = last_user_message(messages)?;
+    let earlier: Vec<String> = messages[..last]
+        .iter()
+        .filter_map(|message| {
+            let speaker = match message.role.as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                _ => return None,
+            };
+            let text = content_text(&message.content);
+            let text = text.trim();
+            (!text.is_empty()).then(|| {
+                format!(
+                    "{speaker}: {}",
+                    text.chars().take(MAX_EARLIER_CHARS).collect::<String>()
+                )
+            })
+        })
+        .collect();
+    if earlier.is_empty() {
+        return Some(current);
+    }
+    let recent = &earlier[earlier.len().saturating_sub(MAX_EARLIER_MESSAGES)..];
+    Some(format!(
+        "[Earlier in this conversation, for context; answer the current message]\n{}\n\n[Current message]\n{current}",
+        recent.join("\n")
+    ))
 }
 
 /// A session id the gateway accepts (the same rules as `X-Session-Id`), derived from `user`.
@@ -129,7 +172,7 @@ pub async fn handle_chat_completions(
             return openai_error(StatusCode::BAD_REQUEST, &error.to_string(), "invalid_request_error");
         }
     };
-    let Some(message) = last_user_message(&request.messages) else {
+    let Some(message) = turn_input(&request.messages) else {
         return openai_error(StatusCode::BAD_REQUEST, "No user message to answer.", "invalid_request_error");
     };
 
@@ -190,6 +233,48 @@ mod tests {
 
     fn message(role: &str, content: Value) -> ChatMessage {
         ChatMessage { role: role.to_string(), content }
+    }
+
+    #[test]
+    fn a_first_message_is_the_input_as_is() {
+        let messages = vec![
+            message("system", json!("be brief")),
+            message("user", json!("hello")),
+        ];
+        assert_eq!(turn_input(&messages).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn earlier_turns_come_as_context_before_the_current_message() {
+        let messages = vec![
+            message("system", json!("be brief")),
+            message("user", json!("Delete Tears of Steel")),
+            message("assistant", json!("Files too?")),
+            message("user", json!("Everything")),
+        ];
+        let input = turn_input(&messages).expect("an input");
+        assert!(
+            input.contains("User: Delete Tears of Steel\nAssistant: Files too?"),
+            "{input}"
+        );
+        assert!(input.ends_with("[Current message]\nEverything"), "{input}");
+        assert!(!input.contains("be brief"), "{input}");
+    }
+
+    #[test]
+    fn only_the_most_recent_earlier_messages_are_kept_each_bounded() {
+        let mut messages: Vec<ChatMessage> = (0..20)
+            .map(|i| message("user", json!(format!("m{i}"))))
+            .collect();
+        messages.push(message(
+            "assistant",
+            json!("q".repeat(MAX_EARLIER_CHARS + 10)),
+        ));
+        messages.push(message("user", json!("now")));
+        let input = turn_input(&messages).expect("an input");
+        assert!(!input.contains("User: m8\n"), "{input}");
+        assert!(input.contains("User: m9\n"), "{input}");
+        assert_eq!(input.matches('q').count(), MAX_EARLIER_CHARS);
     }
 
     #[test]
