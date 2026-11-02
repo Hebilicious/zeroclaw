@@ -80,3 +80,29 @@ fn prose_quoting_the_markup_is_not_a_call() {
     assert!(calls.is_empty(), "{calls:?}");
     assert!(!visible.is_empty());
 }
+
+#[test]
+fn deepseek_dsml_calls_parse_into_their_tool_calls() {
+    // As OpenCode passed them through on 2026-11-02, doubled U+FF5C bars.
+    let observed = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"concierge__series_list\">\n\n</｜｜DSML｜｜ invoke>\n<｜｜DSML｜｜ invoke name=\"remote__devices_list\">\n\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+    let (visible, calls) = parse_tool_calls(observed);
+    assert!(visible.trim().is_empty(), "{visible:?}");
+    let names: Vec<&str> = calls.iter().map(|call| call.name.as_str()).collect();
+    assert_eq!(names, ["concierge__series_list", "remote__devices_list"]);
+    assert_eq!(calls[0].arguments, serde_json::json!({}));
+
+    // DeepSeek's documented shape: string and JSON parameters.
+    let documented = "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"concierge__series_get\">\n<｜DSML｜parameter name=\"tvdbId\" string=\"false\">331753</｜DSML｜parameter>\n<｜DSML｜parameter name=\"seasons\" string=\"false\">[2]</｜DSML｜parameter>\n<｜DSML｜parameter name=\"quality\" string=\"true\">1080p</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>";
+    let (_, calls) = parse_tool_calls(documented);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].arguments,
+        serde_json::json!({ "tvdbId": 331753, "seasons": [2], "quality": "1080p" })
+    );
+
+    // ASCII bars, with words before the call.
+    let ascii = "Checking.\n<|DSML|invoke name=\"remote__devices_list\"></|DSML|invoke>";
+    let (visible, calls) = parse_tool_calls(ascii);
+    assert_eq!(visible, "Checking.");
+    assert_eq!(calls[0].name, "remote__devices_list");
+}

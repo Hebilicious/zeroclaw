@@ -951,6 +951,70 @@ fn parse_xml_tool_calls(xml_content: &str) -> Option<Vec<ParsedToolCall>> {
 }
 
 /// Parse MiniMax-style XML tool calls with attributed invoke/parameter tags.
+/// DeepSeek's own tool-call markup (DSML): `<｜DSML｜invoke name="tool">` holding
+/// `<｜DSML｜parameter name="key" string="true|false">value</｜DSML｜parameter>`, inside
+/// `<｜DSML｜function_calls>` (or `calls`). The bars are U+FF5C, single or doubled, sometimes
+/// ASCII. A gateway normally turns this into tool calls; when one passes it through as text, it is
+/// read here.
+static DSML_INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)<[｜|]+DSML[｜|]+\s*invoke\s+name\s*=\s*"([^"]+)"\s*>(.*?)</[｜|]+DSML[｜|]+\s*invoke\s*>"#)
+        .expect("DSML_INVOKE_RE regex must compile")
+});
+
+static DSML_PARAMETER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)<[｜|]+DSML[｜|]+\s*parameter\s+name\s*=\s*"([^"]+)"([^>]*)>(.*?)</[｜|]+DSML[｜|]+\s*parameter\s*>"#)
+        .expect("DSML_PARAMETER_RE regex must compile")
+});
+
+/// Any DSML tag, for what is left around the calls.
+static DSML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"</?[｜|]+DSML[｜|]+[^<>]*>").expect("DSML_TAG_RE regex must compile")
+});
+
+/// The calls in DeepSeek's DSML markup, and the text around them; `None` without any.
+fn parse_dsml_calls(response: &str) -> Option<(String, Vec<ParsedToolCall>)> {
+    let mut calls = Vec::new();
+    for invoke in DSML_INVOKE_RE.captures_iter(response) {
+        let name = invoke.get(1).map_or("", |m| m.as_str().trim());
+        if name.is_empty() {
+            continue;
+        }
+        let body = invoke.get(2).map_or("", |m| m.as_str());
+        let mut args = serde_json::Map::new();
+        for parameter in DSML_PARAMETER_RE.captures_iter(body) {
+            let key = parameter.get(1).map_or("", |m| m.as_str().trim());
+            if key.is_empty() {
+                continue;
+            }
+            let is_string = parameter
+                .get(2)
+                .is_some_and(|attrs| attrs.as_str().contains(r#"string="true""#));
+            let value = parameter.get(3).map_or("", |m| m.as_str());
+            let value = if is_string {
+                serde_json::Value::String(value.to_string())
+            } else {
+                serde_json::from_str(value.trim())
+                    .unwrap_or_else(|_| serde_json::Value::String(value.trim().to_string()))
+            };
+            args.insert(key.to_string(), value);
+        }
+        calls.push(ParsedToolCall {
+            name: name.to_string(),
+            arguments: serde_json::Value::Object(args),
+            tool_call_id: None,
+        });
+    }
+    if calls.is_empty() {
+        return None;
+    }
+    let without_calls = DSML_INVOKE_RE.replace_all(response, "");
+    let text = DSML_TAG_RE
+        .replace_all(&without_calls, "")
+        .trim()
+        .to_string();
+    Some((text, calls))
+}
+
 /// Tags that may wrap a named-parameter call: `<invoke>`, `<invoke_tool>`, `<invoke/>`,
 /// `<function_calls>` and their closings, and a stray unclosed `<parameter`.
 static NAMED_PARAMETER_WRAPPER_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -2228,6 +2292,10 @@ pub fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
         && !minimax_calls.is_empty()
     {
         return (minimax_text, minimax_calls);
+    }
+
+    if let Some((dsml_text, dsml_calls)) = parse_dsml_calls(response) {
+        return (dsml_text, dsml_calls);
     }
 
     if !response.contains("<tools>")
