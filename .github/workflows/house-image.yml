@@ -75,12 +75,13 @@ jobs:
           platforms: linux/arm64
           target: release
           # Only what the house runs: the agent runtime and gateway (its webhook and OpenAI-compatible
-          # API), ACP, the config schema, and both observability backends (Prometheus metrics, OTLP to
-          # the house's collector). Its config uses no chat channel, plugin or SaaS/CLI tool, so those
+          # API), ACP, the config schema, both observability backends (Prometheus metrics, OTLP to
+          # the house's collector), and tools-external, which carries web_search_tool (the agents'
+          # web search). Its config uses no chat channel, plugin or SaaS/CLI tool, so those
           # are left out. Release without cross-crate LTO and with parallel codegen: a larger binary,
           # built in a fraction of the time.
           build-args: |
-            ZEROCLAW_CARGO_FLAGS=--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-webhook,gateway,observability-otel,observability-prometheus,schema-export
+            ZEROCLAW_CARGO_FLAGS=--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-webhook,gateway,observability-otel,observability-prometheus,schema-export,tools-external
             CARGO_PROFILE_RELEASE_LTO=false
             CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
           push: true
