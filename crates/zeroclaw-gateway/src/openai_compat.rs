@@ -216,15 +216,42 @@ pub async fn handle_chat_completions(
     .into_response()
 }
 
-/// `GET /v1/models`: the configured agents, as models.
+/// `GET /v1/models`: the configured agents, as models. Each also names the model it runs and its
+/// reasoning effort, resolved as a turn resolves them, so a client can show who is answering.
 pub async fn handle_models(State(state): State<AppState>) -> Response {
     let config = state.config.read();
     let data: Vec<Value> = config
         .agents
         .keys()
-        .map(|alias| json!({ "id": alias, "object": "model", "owned_by": "zeroclaw" }))
+        .map(|alias| agent_model(&config, alias))
         .collect();
     Json(json!({ "object": "list", "data": data })).into_response()
+}
+
+/// One agent as a model: its alias, its model provider, the provider's model, and the reasoning
+/// effort it runs at (the provider's own, else `[runtime]`'s).
+fn agent_model(config: &zeroclaw_config::schema::Config, alias: &str) -> Value {
+    let provider = config
+        .agent(alias)
+        .map(|agent| agent.model_provider.as_str().to_string())
+        .unwrap_or_default();
+    let entry = config
+        .providers
+        .models
+        .iter_entries()
+        .find(|(kind, name, _)| format!("{kind}.{name}") == provider)
+        .map(|(_, _, entry)| entry);
+    let effort = entry
+        .and_then(|entry| entry.reasoning_effort.clone())
+        .or_else(|| config.runtime.reasoning_effort.clone());
+    json!({
+        "id": alias,
+        "object": "model",
+        "owned_by": "zeroclaw",
+        "model_provider": provider,
+        "model": entry.and_then(|entry| entry.model.clone()),
+        "reasoning_effort": effort,
+    })
 }
 
 #[cfg(test)]
@@ -233,6 +260,40 @@ mod tests {
 
     fn message(role: &str, content: Value) -> ChatMessage {
         ChatMessage { role: role.to_string(), content }
+    }
+
+    #[test]
+    fn an_agent_as_a_model_names_its_model_and_effort() {
+        let config: zeroclaw_config::schema::Config = toml::from_str(
+            r#"
+default_temperature = 0.7
+
+[runtime]
+reasoning_effort = "high"
+
+[providers.models.anthropic.main]
+model = "claude-haiku-5-5"
+
+[providers.models.custom.opencode]
+uri = "https://example.invalid/v1"
+model = "deepseek-v4.1-flash"
+reasoning_effort = "max"
+
+[agents.jarvis]
+model_provider = "anthropic.main"
+
+[agents.edith]
+model_provider = "custom.opencode"
+"#,
+        )
+        .expect("config");
+        let edith = agent_model(&config, "edith");
+        assert_eq!(edith["model"], json!("deepseek-v4.1-flash"));
+        assert_eq!(edith["reasoning_effort"], json!("max"));
+        let jarvis = agent_model(&config, "jarvis");
+        assert_eq!(jarvis["model"], json!("claude-haiku-5-5"));
+        assert_eq!(jarvis["reasoning_effort"], json!("high"));
+        assert_eq!(jarvis["model_provider"], json!("anthropic.main"));
     }
 
     #[test]
