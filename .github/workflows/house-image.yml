@@ -40,6 +40,8 @@ jobs:
               max-parallelism = 1
       # The Dockerfile's cache mounts live in the builder, which goes with the runner: restore them
       # from the Actions cache (the newest run's, by prefix) and save this run's after the build.
+      # The cache map's keys are the directories themselves (cache-dir applies only when the map is
+      # discovered from the Dockerfile), so each sits under cargo-cache/, the path the cache saves.
       - name: Restore the Cargo caches
         id: cargo_cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -51,13 +53,12 @@ jobs:
         uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
         with:
           builder: ${{ steps.buildx.outputs.name }}
-          cache-dir: cargo-cache
           cache-map: |
             {
-              "registry": { "target": "/usr/local/cargo/registry", "id": "zeroclaw-cargo-registry" },
-              "git": { "target": "/usr/local/cargo/git", "id": "zeroclaw-cargo-git" },
-              "target": { "target": "/app/target", "id": "zeroclaw-target" },
-              "web-target": { "target": "/app/target", "id": "zeroclaw-web-target" }
+              "cargo-cache/registry": { "target": "/usr/local/cargo/registry", "id": "zeroclaw-cargo-registry" },
+              "cargo-cache/git": { "target": "/usr/local/cargo/git", "id": "zeroclaw-cargo-git" },
+              "cargo-cache/target": { "target": "/app/target", "id": "zeroclaw-target" },
+              "cargo-cache/web-target": { "target": "/app/target", "id": "zeroclaw-web-target" }
             }
           skip-extraction: ${{ steps.cargo_cache.outputs.cache-hit }}
       - uses: docker/login-action@v3
