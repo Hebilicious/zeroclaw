@@ -849,7 +849,10 @@ pub fn model_provider_runtime_options_from_model_provider_entry(
         zeroclaw_dir: config.config_path.parent().map(PathBuf::from),
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
-        reasoning_effort: config.runtime.reasoning_effort.clone(),
+        // The provider's own effort wins over the runtime's.
+        reasoning_effort: entry
+            .and_then(|e| e.reasoning_effort.clone())
+            .or_else(|| config.runtime.reasoning_effort.clone()),
         reasoning_effort_passthrough: entry.is_some_and(|e| e.reasoning_effort_passthrough),
         provider_timeout_secs: Some(entry.and_then(|e| e.timeout_secs).unwrap_or(120)),
         extra_headers: entry.map(|e| e.extra_headers.clone()).unwrap_or_default(),

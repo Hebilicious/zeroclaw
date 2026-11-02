@@ -1117,6 +1117,18 @@ pub struct ModelProviderConfig {
     #[tab(Advanced)]
     #[serde(default, skip_serializing_if = "is_false")]
     pub reasoning_effort_passthrough: bool,
+    /// Reasoning effort for this provider's models, in place of
+    /// `[runtime] reasoning_effort` (minimal, low, medium, high, xhigh, max).
+    /// `None` (default) uses the runtime's. Lets one provider run at a level
+    /// another doesn't take, e.g. `max` on a DeepSeek gateway while Claude
+    /// stays at `high`.
+    #[tab(Advanced)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_reasoning_effort_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort: Option<String>,
     /// Pull live token prices for this provider's models from its own
     /// OpenAI-compatible `/models` listing (the gateway is the source of truth
     /// for its prices), filling cost-tracking rates for models the operator
@@ -5513,9 +5525,9 @@ pub fn validate_temperature(value: f64) -> std::result::Result<f64, String> {
 fn normalize_reasoning_effort(value: &str) -> std::result::Result<String, String> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "minimal" | "low" | "medium" | "high" | "xhigh" => Ok(normalized),
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => Ok(normalized),
         _ => Err(format!(
-            "reasoning_effort {value:?} is invalid (expected one of: minimal, low, medium, high, xhigh)"
+            "reasoning_effort {value:?} is invalid (expected one of: minimal, low, medium, high, xhigh, max)"
         )),
     }
 }
@@ -34446,6 +34458,28 @@ reasoning_effort = "HIGH"
 
         let parsed: Config = toml::from_str(raw).unwrap();
         assert_eq!(parsed.runtime.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    async fn a_provider_reasoning_effort_deserializes_including_max() {
+        let raw = r#"
+default_temperature = 0.7
+
+[runtime]
+reasoning_effort = "high"
+
+[providers.models.custom.opencode]
+uri = "https://example.invalid/v1"
+reasoning_effort = "MAX"
+"#;
+
+        let parsed: Config = toml::from_str(raw).unwrap();
+        let entry = parsed.providers.models.custom.get("opencode").expect("the opencode entry");
+        assert_eq!(entry.base.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(parsed.runtime.reasoning_effort.as_deref(), Some("high"));
+
+        let bad = raw.replace("\"MAX\"", "\"extreme\"");
+        assert!(toml::from_str::<Config>(&bad).is_err());
     }
 
     #[test]
