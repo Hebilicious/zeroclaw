@@ -569,6 +569,11 @@ fn looks_like_malformed_tagged_tool_protocol_envelope(text: &str) -> bool {
     if looks_like_tool_protocol_example(text) {
         return false;
     }
+    // Nothing but tags (`<invoke_web_search_placeholder></invoke_web_search_placeholder>`): a call
+    // with no tool or arguments in it, and nothing a person could read.
+    if ANY_TAG_RE.replace_all(text, "").trim().is_empty() {
+        return true;
+    }
 
     let (visible_text, calls) = parse_tool_calls(text);
     if !calls.is_empty() || !visible_text.trim().is_empty() {
@@ -839,6 +844,10 @@ static XML_OPEN_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// MiniMax XML invoke format:
 /// `<invoke name="shell"><parameter name="command">pwd</parameter></invoke>`
+/// Any tag, for telling a response made only of tags.
+static ANY_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^<>]*>").expect("ANY_TAG_RE regex must compile"));
+
 static MINIMAX_INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?is)<invoke\b[^>]*\bname\s*=\s*(?:"([^"]+)"|'([^']+)')[^>]*>(.*?)</invoke>"#)
         .expect("MINIMAX_INVOKE_RE regex must compile")

@@ -59,6 +59,21 @@ fn observed_placeholder_reply_is_malformed_protocol() {
 }
 
 #[test]
+fn observed_empty_tool_tags_are_malformed_protocol() {
+    let text = "<invoke_web_search_placeholder>\n</invoke_web_search_placeholder>";
+    assert!(looks_like_malformed_tool_protocol_envelope_for_known_tools(
+        text,
+        &known()
+    ));
+    assert!(
+        !looks_like_malformed_tool_protocol_envelope_for_known_tools(
+            "<b>Season 2</b> is out",
+            &known()
+        )
+    );
+}
+
+#[test]
 fn prose_quoting_the_markup_is_not_a_call() {
     let text = "Write <parameter name=\"name\">x</parameter> to name the tool.";
     let (visible, calls) = parse_tool_calls(text);
