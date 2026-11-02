@@ -49,6 +49,9 @@ jobs:
           path: cargo-cache
           key: house-cargo-${{ github.sha }}
           restore-keys: house-cargo-
+      # The extraction after the build renames each cache into place, which needs the parent to exist.
+      - name: Make the Cargo cache directory
+        run: mkdir -p cargo-cache
       - name: Put the Cargo caches into the builder
         uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
         with:
