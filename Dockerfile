@@ -49,6 +49,10 @@ RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/regist
 # rustc never runs under QEMU. TARGETARCH is injected by BuildKit per target
 # platform (`amd64`/`arm64`).
 FROM --platform=$BUILDPLATFORM ${ZEROCLAW_BASE_RUST_SLIM} AS builder
+# The house image (house-image.yml) builds with lighter release settings: no cross-crate LTO and
+# parallel codegen, so a small change rebuilds in minutes. Unset, Cargo.toml's release profile applies.
+ARG CARGO_PROFILE_RELEASE_LTO
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS
 
 WORKDIR /app
 ARG TARGETARCH

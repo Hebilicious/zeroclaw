@@ -1,6 +1,10 @@
 # The image the house's Pi runs (Hebilicious/pi-talos, cluster/agents/zeroclaw/): this branch's
 # changes on top of upstream, built natively for arm64 and pushed to
 # ghcr.io/hebilicious/zeroclaw:house-agent (and :house-agent-<commit>).
+#
+# Built for turnaround: the Dockerfile's Cargo caches (registry, git, target) are carried from one
+# run to the next, the release profile skips cross-crate LTO, and only the features the house uses
+# are compiled, so a small change recompiles what it touched instead of the whole tree.
 name: House image
 
 on:
@@ -22,17 +26,40 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
-      # The final fat-LTO link exhausts the runner's memory (ResourceExhausted): bounded swap and one
-      # BuildKit step at a time, as upstream's docker-publish.yml does.
+      # Bounded swap and one BuildKit step at a time, as upstream's docker-publish.yml does: a full
+      # release link can exhaust the runner's memory (ResourceExhausted).
       - name: Prepare bounded build memory
         id: dist_memory
         timeout-minutes: 5
         run: bash scripts/ci/dist_runner_memory.sh prepare
       - uses: docker/setup-buildx-action@v3
+        id: buildx
         with:
           buildkitd-config-inline: |
             [worker.oci]
               max-parallelism = 1
+      # The Dockerfile's cache mounts live in the builder, which goes with the runner: restore them
+      # from the Actions cache (the newest run's, by prefix) and save this run's after the build.
+      - name: Restore the Cargo caches
+        id: cargo_cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: cargo-cache
+          key: house-cargo-${{ github.sha }}
+          restore-keys: house-cargo-
+      - name: Put the Cargo caches into the builder
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          cache-dir: cargo-cache
+          cache-map: |
+            {
+              "registry": { "target": "/usr/local/cargo/registry", "id": "zeroclaw-cargo-registry" },
+              "git": { "target": "/usr/local/cargo/git", "id": "zeroclaw-cargo-git" },
+              "target": { "target": "/app/target", "id": "zeroclaw-target" },
+              "web-target": { "target": "/app/target", "id": "zeroclaw-web-target" }
+            }
+          skip-extraction: ${{ steps.cargo_cache.outputs.cache-hit }}
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -43,10 +70,15 @@ jobs:
           context: .
           platforms: linux/arm64
           target: release
-          # The Dockerfile's default features, plus observability-otel: the house exports its agents'
-          # telemetry over OTLP (the default build has only the Prometheus backend).
+          # Only what the house runs: the agent runtime and gateway (its webhook and OpenAI-compatible
+          # API), ACP, the config schema, and both observability backends (Prometheus metrics, OTLP to
+          # the house's collector). Its config uses no chat channel, plugin or SaaS/CLI tool, so those
+          # are left out. Release without cross-crate LTO and with parallel codegen: a larger binary,
+          # built in a fraction of the time.
           build-args: |
-            ZEROCLAW_CARGO_FLAGS=--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-discord,channel-email,channel-filesystem,channel-git,channel-lark,channel-matrix,channel-telegram,channel-webhook,gateway,observability-otel,observability-prometheus,plugins-wasm-cranelift,schema-export,tool-claude-code,tool-claude-code-runner,tool-codex-cli,tool-composio,tool-gemini-cli,tool-google-workspace,tool-jira,tool-linkedin,tool-microsoft365,tool-notion,tool-opencode-cli,tool-project-intel,tools-external,whatsapp-web
+            ZEROCLAW_CARGO_FLAGS=--no-default-features --features acp-bridge,agent-runtime,channel-acp-server,channel-webhook,gateway,observability-otel,observability-prometheus,schema-export
+            CARGO_PROFILE_RELEASE_LTO=false
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
           push: true
           tags: |
             ghcr.io/hebilicious/zeroclaw:house-agent
