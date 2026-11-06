@@ -3,7 +3,7 @@
 //! Lets any OpenAI client talk to a ZeroClaw agent. A request runs one gateway chat turn, the
 //! same turn `/webhook` runs: its last user message is the turn's input. A turn has no transcript
 //! of its own (the session only scopes memory recall), so the earlier user and assistant messages
-//! in `messages` come with it as context, the most recent ones and each bounded.
+//! in `messages` come with it as context: all of them, each bounded, up to a total budget.
 //!
 //! - Authentication is the webhook's: the gateway's pairing token, or `gateway.webhook_secret`.
 //!   OpenAI clients send their key as `Authorization: Bearer <key>`; that key is checked as the
@@ -71,15 +71,17 @@ fn last_user_message(messages: &[ChatMessage]) -> Option<String> {
         .filter(|text| !text.trim().is_empty())
 }
 
-/// How many earlier messages of the conversation are given to the turn, and how much of each.
-const MAX_EARLIER_MESSAGES: usize = 12;
-const MAX_EARLIER_CHARS: usize = 1000;
+/// How much of each earlier message is given to the turn, and how much of the earlier conversation in
+/// all (about 25k tokens): the whole of a chat's conversation, and only its oldest messages are left
+/// out of one that outgrows it.
+const MAX_EARLIER_CHARS: usize = 4_000;
+const MAX_CONVERSATION_CHARS: usize = 100_000;
 
 /// The turn's input: the last user message, preceded by the conversation before it. A gateway
 /// turn starts from the agent's own prompt with no transcript, so an OpenAI client, which sends
 /// the whole conversation each time, gets it read as context: the user's and the assistant's
-/// earlier messages (system messages are the agent's own prompt's business), the most recent
-/// ones, each bounded.
+/// earlier messages (system messages are the agent's own prompt's business), each bounded, the
+/// oldest left out when they outgrow the budget.
 fn turn_input(messages: &[ChatMessage]) -> Option<String> {
     let last = messages
         .iter()
@@ -106,7 +108,18 @@ fn turn_input(messages: &[ChatMessage]) -> Option<String> {
     if earlier.is_empty() {
         return Some(current);
     }
-    let recent = &earlier[earlier.len().saturating_sub(MAX_EARLIER_MESSAGES)..];
+    let mut budget = MAX_CONVERSATION_CHARS;
+    let kept = earlier
+        .iter()
+        .rev()
+        .take_while(|line| {
+            let size = line.chars().count() + 1;
+            let fits = size <= budget;
+            budget = budget.saturating_sub(size);
+            fits
+        })
+        .count();
+    let recent = &earlier[earlier.len() - kept..];
     Some(format!(
         "[Earlier in this conversation, for context; answer the current message]\n{}\n\n[Current message]\n{current}",
         recent.join("\n")
@@ -323,8 +336,8 @@ model_provider = "custom.opencode"
     }
 
     #[test]
-    fn only_the_most_recent_earlier_messages_are_kept_each_bounded() {
-        let mut messages: Vec<ChatMessage> = (0..20)
+    fn the_whole_conversation_is_kept_each_message_bounded() {
+        let mut messages: Vec<ChatMessage> = (0..60)
             .map(|i| message("user", json!(format!("m{i}"))))
             .collect();
         messages.push(message(
@@ -333,9 +346,23 @@ model_provider = "custom.opencode"
         ));
         messages.push(message("user", json!("now")));
         let input = turn_input(&messages).expect("an input");
-        assert!(!input.contains("User: m8\n"), "{input}");
-        assert!(input.contains("User: m9\n"), "{input}");
+        assert!(input.contains("User: m0\n"), "{input}");
+        assert!(input.contains("User: m59\n"), "{input}");
         assert_eq!(input.matches('q').count(), MAX_EARLIER_CHARS);
+    }
+
+    #[test]
+    fn the_oldest_messages_go_when_the_conversation_outgrows_its_budget() {
+        let filler = "x".repeat(MAX_EARLIER_CHARS - 20);
+        let count = MAX_CONVERSATION_CHARS / MAX_EARLIER_CHARS + 5;
+        let mut messages: Vec<ChatMessage> = (0..count)
+            .map(|i| message("user", json!(format!("m{i}: {filler}"))))
+            .collect();
+        messages.push(message("user", json!("now")));
+        let input = turn_input(&messages).expect("an input");
+        assert!(!input.contains("User: m0:"), "the oldest is left out");
+        assert!(input.contains(&format!("User: m{}:", count - 1)), "the newest is kept");
+        assert!(input.chars().count() < MAX_CONVERSATION_CHARS + 200);
     }
 
     #[test]
